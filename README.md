@@ -5,7 +5,7 @@ Compare the reasoning performance of different LLMs (GPT-4, GPT-4o-mini, Gemini-
 Focus: Syntax vs. Semantic error breakdown.
 
 ## 📂 Repository Structure
-/mcp_host/   → MCP host code  
+/mcp_host/   → MCP server code  
 /mcp_client/ → MCP client code  
 /schemas/    → JSON Schema definitions  
 /eval/       → Evaluation scripts  

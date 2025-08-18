@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "aggregation_by_time",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "collection": {
+      "description": "Target social media collection.",
+      "type": "string",
+      "enum": ["twitter", "mastodon", "bluesky", "reddit", "youtube", "flickr"]
+    },
+    "startDate": {
+      "description": "Start date (inclusive), format YYYY-MM-DD.",
+      "type": "string",
+      "format": "date",
+      "examples": ["2025-07-01"]
+    },
+    "endDate": {
+      "description": "End date (inclusive), format YYYY-MM-DD.",
+      "type": "string",
+      "format": "date",
+      "examples": ["2025-07-11"]
+    },
+    "aggregationLevel": {
+      "description": "Temporal granularity.",
+      "type": "string",
+      "enum": ["day", "month", "year"]
+    },
+    "sentiment": {
+      "description": "If true, request sentiment stats; otherwise counts.",
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "required": ["collection", "startDate", "endDate", "aggregationLevel"]
+}
