@@ -149,7 +149,7 @@ async def chat_once(user_query: str, server_dir: Path, server_script: str | None
                                 "role": "tool",
                                 "tool_call_id": tc.id,
                                 "name": name,
-                                "content": f"ERROR calling tool {name}: {e}",
+                                "content": f"[TOOL_ERROR:{name}] {e}",
                             }
                         )
 
