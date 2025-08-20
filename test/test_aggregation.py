@@ -1,6 +1,6 @@
 # tests/test_aggregation.py
 import os
-from mcp_host.aio_client import AIOClient
+from mcp_server.aio_client import AIOClient
 
 def main():
     client = AIOClient(

@@ -1,13 +1,15 @@
-from mcp.server.fastmcp import FastMCP, Context
-from mcp.server.session import ServerSession
-
 import sys, pathlib
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from mcp_host.aio_client import AIOClient
+import logging
+from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.session import ServerSession
+from mcp_server.aio_client import AIOClient
 from typing import Optional, Any
+
+logging.basicConfig(level=logging.INFO, stream=sys.stderr)
 
 # create FastMCP server
 mcp = FastMCP("AIO-API")
@@ -19,8 +21,6 @@ def get_client() -> AIOClient:
     if _client is None:
         _client = AIOClient()
     return _client
-
-
 
 # ------------------------------------------------------------------------
 #                           Define Tools
@@ -56,31 +56,18 @@ def collection_summary(collection: str) -> dict[str, Any]:
 
 # ------- Aggregation Tools -------
 # Tool -- Aggregate by time (count / sentiment)
-
-
 # Tool -- Seasonality aggregation
-
-
 # Tool -- Language aggregation
-
-
 # Tool -- Place aggregation
-
-
 
 # ------- Terms / Keywords -------
 # Tool -- All terms (dictionary of stem → count)
-
 # Tool -- Specific terms (daily series)
 
 # ------- NLP / Embeddings / Topics -------
 # Tool -- List terms available for a given day’s embedding model
-
 # Tool -- Similar terms for a query word on a given day
-
-
 # Tool -- Topic modelling (BERTopic)
-
 
 
 # ------------------------------------------------------------------------
@@ -110,3 +97,4 @@ def collection_summary(collection: str) -> dict[str, Any]:
 
 if __name__ == "__main__":
     mcp.run()
+    # uv run mcp dev mcp_server/server.py

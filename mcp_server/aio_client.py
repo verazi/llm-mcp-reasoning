@@ -1,11 +1,12 @@
 import os
 import time
+from json import JSONDecodeError
+
 import requests
 from dotenv import load_dotenv
-from requests.auth import HTTPBasicAuth
 from requests.adapters import HTTPAdapter
+from requests.auth import HTTPBasicAuth
 from urllib3.util.retry import Retry
-from json import JSONDecodeError
 
 
 class AIOClient:
@@ -96,18 +97,6 @@ class AIOClient:
     # ------- Aggregation -------
     def aggregate_by_time(self, collection: str, start_date: str, end_date: str, aggregation_level: str,  # "day" | "month" | "year"
         sentiment: bool = False, extra_params: dict | None = None,):
-        """
-        GET /analysis/aggregate/collections/{collection}/aggregation
-        :param：
-          - startDate, endDate: "YYYY-MM-DD" (OR date-time)
-          - aggregationLevel: "day" | "month" | "year"
-          - sentiment:
-                if False, then return count
-                if True, then return sentiment and sentimentcount
-        :return
-          - count: [{"time":"2021-07-01","count":N}, ...]
-          - sentiment: [{"time":"2021-07-01","sentiment":S,"sentimentcount":N}, ...]
-        """
         level = aggregation_level.lower()
         if level not in {"day", "month", "year"}:
             raise ValueError("aggregation_level must be one of: day, month, year")
