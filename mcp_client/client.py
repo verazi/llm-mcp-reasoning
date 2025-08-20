@@ -15,7 +15,7 @@ load_dotenv(ROOT / ".env")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# ---- 把 MCP tool 轉成 OpenAI 的 function schema ----
+# ---- convert MCP tool to OpenAI function schema ----
 def mcp_tool_to_openai(tool) -> dict:
     params = (
         getattr(tool, "input_schema", None)
@@ -31,13 +31,16 @@ def mcp_tool_to_openai(tool) -> dict:
         },
     }
 
-# ---- 把 MCP call_tool 回傳結果轉成文字（餵回 LLM）----
+# ---- return MCP call_tool to LLM ----
 def tool_result_to_text(result: Any) -> str:
-    # result.content 可能是 list[{"type":"text","text":"..."}, {"type":"json","json":{...}}]
     content = getattr(result, "content", None)
+
     if not content and isinstance(result, dict):
         content = result.get("content")
+
     parts: List[str] = []
+
+    # if retrun type is list
     if isinstance(content, list):
         for item in content:
             t = getattr(item, "type", None) or (isinstance(item, dict) and item.get("type"))
@@ -50,21 +53,22 @@ def tool_result_to_text(result: Any) -> str:
                 parts.append(str(item))
     if parts:
         return "\n".join(p for p in parts if p is not None)
-    # 兜底：整包轉字串
+
     try:
         return json.dumps(result, ensure_ascii=False)
     except Exception:
         return str(result)
 
-async def chat_once(
-    user_query: str,
-    server_dir: Path,
-    server_script: str | None = "server.py",
-    server_module: str | None = None,
-    max_tool_rounds: int = 3,
+
+# ---- connect to MCP server and start chat ----
+async def chat_once(user_query: str, server_dir: Path, server_script: str | None = "server.py",
+                    server_module: str | None = None, max_tool_rounds: int = 3,
 ):
-    """用 stdio 啟 MCP server（透過 uv），把工具交給 LLM 決策，必要時呼叫工具多輪，回最終答案。"""
-    # `uv run mcp dev <ABSOLUTE_PATH_TO_SERVER_PY>`
+    """
+    use stdio to start MCP server
+    return tool list to LLM first, and the answer multi-turn messages if needed
+    """
+
     script_path = (server_dir / (server_script or "server.py")).resolve()
     params = StdioServerParameters(
         command="uv",
@@ -76,10 +80,9 @@ async def chat_once(
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            # 取得 tools，轉成 LLM 可用的 function schema
             tools_resp = await session.list_tools()
             tools = tools_resp.tools
-            print([t.name for t in tools])
+            print([t.name for t in tools]) # debugging
             oa_tools = [mcp_tool_to_openai(t) for t in tools]
             tools_by_name = {t.name: t for t in tools}
 
@@ -90,13 +93,13 @@ async def chat_once(
                         "You can call tools via MCP. "
                         "For AIO version use `aio_version`. "
                         "For collection summary use `collection_summary` with {collection}."
-                        "If a tool returns an error, fix the arguments and retry up to 2 times."
+                        "If a tool returns an error, fix the arguments and retry up to 3 times."
                     ),
                 },
                 {"role": "user", "content": user_query},
             ]
 
-            # 多輪工具迴圈
+            # multi-turn loop
             for _ in range(max_tool_rounds + 1):
                 resp = openai.chat.completions.create(
                     model=OPENAI_MODEL,
@@ -107,7 +110,7 @@ async def chat_once(
                 msg = resp.choices[0].message
                 tool_calls = getattr(msg, "tool_calls", None)
 
-                # 沒有工具呼叫 → 視為最終答案
+                # no tool
                 if not tool_calls:
                     print(msg.content or "")
                     break
@@ -127,7 +130,6 @@ async def chat_once(
                                  ]
                                  })
 
-                # 逐一執行工具並把結果回餵
                 for tc in tool_calls:
                     name = tc.function.name
                     args = json.loads(tc.function.arguments or "{}")
@@ -150,7 +152,6 @@ async def chat_once(
                                 "content": f"ERROR calling tool {name}: {e}",
                             }
                         )
-                # 迴圈會把工具結果再丟回去，讓模型決定是否還要下一輪
 
 if __name__ == "__main__":
     import argparse
@@ -170,25 +171,3 @@ if __name__ == "__main__":
             server_module=args.server_module,
         )
     )
-
-
-
-# OpenAI Testing
-# import os
-# import pathlib
-#
-# from dotenv import load_dotenv
-# from openai import OpenAI
-#
-# ROOT = pathlib.Path(__file__).resolve().parent.parent
-# load_dotenv(ROOT / ".env")
-#
-# client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-#
-# resp = client.chat.completions.create(
-#     model="gpt-4o-mini",
-#     messages=[{"role": "user", "content": "Hello from MCP client!"}]
-# )
-# print(resp.model)
-# print(resp.usage)
-# print(resp.choices[0].message)
