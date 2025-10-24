@@ -33,6 +33,8 @@ git clone https://github.com/verazi/llm-mcp-reasoning.git
 cd llm-mcp-reasoning
 ```
 
+Add the `AIO_API_KEY` key and `LLM_API_KEY` in env.
+
 ### 2. Create and activate a virtual environment
 ```bash
 uv venv .venv --clear
