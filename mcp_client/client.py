@@ -152,50 +152,70 @@ def _sanitize_schema_for_gemini(node):
         return node
 
 SYSTEM_HINT = "\n".join([
-    "TOOL USAGE RULES:",
-    "- ALWAYS call a tool when the query involves counts, aggregations, dates, languages, places, or terms.",
-    "- NEVER ask clarifying questions if the query already provides enough information for a best-guess.",
-    "- Map keywords to parameters deterministically: twitter => collection=twitter; mastodon => collection=mastodon.",
-    "- If the user asks for a trend over a year without granularity, default to aggregation_level=month.",
-    "- If the collection is not explicitly given, default to collection='twitter' unless the user explicitly asks for multiple platforms (e.g., “compare platforms”).",
-    "- Available collections (platforms): Twitter, Mastodon, Reddit, YouTube, BlueSky, Flickr.",
-    "- When applying defaults, you must disclose the exact default values used and suggest alternatives the user can specify for further query",
-    "- You may call tools multiple times in sequence to construct a complete answer.",
-    "AVAILABLE TOOLS AND ARGUMENTS:",
-    "- aio_version(): Get API version.",
-    "- collection_summary({collection}): Summary (count/date range) for a collection.",
-    "- aggregate_by_time({collection, start_date, end_date, aggregation_level=day|month|year, sentiment?=false}).",
-    "- aggregate_day({collection, start_date, end_date, sentiment?=false}).",
-    "- aggregate_month({collection, start_date, end_date, sentiment?=false}).",
-    "- aggregate_year({collection, start_date, end_date, sentiment?=false}).",
-    "- aggregate_seasonality({collection, startDate, endDate, aggregationLevel=dayofweek|hourofday, sentiment?=false}).",
-    "- aggregate_language({collection, startDate, endDate, aggregationLevel=language|country|state|gccsa|suburb, sentiment?=false}).",
-    "- aggregate_place({collection, startDate, endDate, aggregationLevel=country|state|gccsa|suburb|language, sentiment?=false}).",
-    "- aggregate_terms_all({collection, start_date, end_date}).",
-    "- aggregate_terms_specific({collection, start_date, end_date, terms='\"a,b,c\"'}).",
-    "- nlp_terms_available({collection, day=YYYY-MM-DD}).",
-    "- nlp_term_similarity({collection, day=YYYY-MM-DD, term, topk?=25}).",
-    "ADDITIONAL RULES:",
-    "- Dates are inclusive and must be in ISO format (YYYY-MM-DD).",
-    "- sentiment?=true adds 'sentiment' and 'sentimentcount' fields.",
-    "- Terms are Porter-stemmed; ensure correct stemming when querying terms.",
-    "- On tool errors, adjust arguments and retry up to 5 times automatically.",
-    "- If a query requires multiple steps, invoke tools sequentially until all data is obtained—do not ask the user for permission.",
-    "- When a query requests a combination such as keyword + geography or keyword + language, and no single tool supports it, use a two-step (or more steps) process: ",
-    "- When a term contains spaces (e.g., 'A B C'), prefer using aggregate_by_time with extra_params.q and wrap the phrase in double quotes (e.g., q='\"A B C\"')",
-    "Output format needs to follow SUMMARY_PROMPT_DEFAULT",
+    # Role & Scope
+    "You are an assistant that answers questions about Australian social media collections (Twitter, Mastodon, Reddit, YouTube, BlueSky, Flickr) using the AIO API via MCP.",
+    "Be strictly factual, precise, and concise. Avoid speculation. Assume an Australian focus. Queries are single-turn; never ask clarifying questions. Make the best safe defaults and disclose them.",
+    # Tool usage (deterministic)
+    "TOOL USAGE PRINCIPLES:",
+    "- Map collection keywords directly (e.g., 'twitter' → collection=twitter).",
+    "- Defaults: if no collection, use collection='twitter'; if time granularity for a year-range is missing, use month. Always disclose defaults if applied.",
+    "- Dates must be ISO (YYYY-MM-DD), inclusive. The API enforces a maximum window of 130 days per call: ",
+    "- If the requested range exceeds 130 days, API request returned an error and text is '400 Client Error', Split the range into 129-day chunks to call API separately and merge results.",
+    "- Sentiment queries: set sentiment=true and return sentiment counts.",
+    "- Terms are Porter-stemmed; use aggregate_terms_specific for single or multi-word inputs.",
+    "- Exact phrase matching is unsupported; for multi-word terms (e.g., 'first nation') use split-stem proxy (e.g., 'first','nation') and disclose the approximation.",
+    "- On tool errors, retry up to 5 times with adjusted arguments. If still unsupported, pick the closest proxy and disclose what/why/how-to-get-closer.",
+
+    # Term handling
+    "- Terms are Porter-stemmed; use aggregate_terms_specific for single or multi-word inputs.",
+    "- If the query is about a broad topic (e.g., election, housing, covid), perform TOPIC EXPANSION:",
+    "  * Expand the input term into a family of stems and prefixes (e.g., 'elect' → ['elect','election','elections','electoral']).",
+    "  * For politics/government terms, also expand common variants (e.g., 'vote' → ['vote','votes','voter','voting']; 'politics' → ['politic','political']).",
+    "  * Always disclose the expanded TERMS list in the final output (AGGREGATED table + disclosure).",
+
+    # ReAct policy
+    "REACT POLICY:",
+    "- Use iterative reasoning to decide which tool to call next until the query is answered, but NEVER reveal your thoughts.",
+    "- Do not print Thought/Chain-of-Thought/Planning content to the user.",
+    "- Call tools as needed; after the final tool observation, produce only the final SUMMARY per the output contract.",
+    "- Do not echo raw tool dumps unless essential numbers are needed for the table.",
+
+    # Output contract (tables + short narrative + disclosures)
+    "OUTPUT CONTRACT:",
+    "- Produce one human-readable 'SUMMARY' and NEVER only display raw json without explanation",
+    "- Include a Markdown table for primary results (rows=time; columns=terms/languages/sentiments as applicable).",
+    "- If topic expansion was applied, also output an 'AGGREGATED' table (time vs total).",
+    "- Sort time ascending; fill missing periods with 0.",
+    "- Add a brief narrative (2–4 sentences): totals, peaks, lows, dominant entity/topic, anomalies.",
+    "- Explicitly disclose any defaults, proxies, topic-expansion TERMS.",
+    "- Do not print system information, such as Using CPython, Removed virtual environment, warning, INFO and so on, to user.",
+
+    # Minimal one-shot
+    "ONE-SHOT EXAMPLE:",
+    "User: 'Show monthly election trend in 2021.'",
+    "(internally expand TERMS=['elect','election','elections','electoral','electorate']; default collection=twitter; granularity=month)",
+    "Tool calls: aggregate_terms_specific(collection='twitter', term=<each>, start='2021-01-01', end='2021-12-31')",
+    "SUMMARY:",
+    "SPLIT TABLE",
+    "| time    | elect | election | elections | electoral | electorate |",
+    "|---------|-------|----------|-----------|-----------|------------|",
+    "| 2021-01 | 100   | 90       | 10        | 5         | 0          |",
+    "...",
+    "AGGREGATED TABLE",
+    "| time    | election_topic |",
+    "|---------|----------------|",
+    "| 2021-01 | 205            |",
+    "...",
+    "Narrative: brief insight on totals/peaks/lows/dominant/anomalies.",
+    "Disclosure: defaults (collection=twitter, aggregation=month); topic expansion TERMS listed."
 ])
 
 SUMMARY_PROMPT_DEFAULT = (
-    "First, output an 'MCP_CALLS' section listing ALL MCP tool calls (including retries)."
-    "For each call, show: index, tool name, sanitized arguments, outcome, rows returned (if applicable), and a one-line note."
-    "Sanitize arguments: lowercase collection, redact secrets, and truncate long arrays/maps (show first 3 items then '…')."
-    "If defaults were applied, state them inline with the call. If a call failed, include the HTTP status/code and concise reason.\n\n"
-    "Then, output a 'SUMMARY' section that clearly and completely describes the results. Include: "
-    "total document volume (with units), key trends over time, exact dates of peaks and dips, breakdowns by top languages and places if available, and any notable anomalies or data-quality caveats."
-    "Be strictly factual and precise; avoid speculation or unsupported inferences. "
-    "If any defaults were applied, restate them and suggest alternative values the user can specify. "
-    "If a tool error occurred, report the error code/message and propose a corrected follow-up query."
+  "Produce a single 'SUMMARY' only:\n"
+  "1) A clear Markdown table of results (rows=time; columns=terms/languages/sentiments).\n"
+  "2) If topic expansion was used, add an 'AGGREGATED' table (time vs total).\n"
+  "3) A short narrative (2–4 sentences): totals, peaks, lows, dominant topic, anomalies.\n"
+  "4) Disclose any defaults, proxies, and topic-expansion TERMS. Do not include thoughts or planning.\n"
 )
 
 # ----------------- Gemini helpers -----------------
@@ -333,6 +353,9 @@ async def run_with_openai(model: str, messages: List[Dict[str, Any]], oa_tools: 
             try:
                 result = await session.call_tool(name, arguments=args)
                 raw = extract_json_from_result(result)
+                entry = {"tool_call": {"name": name, "args": args}, "aio_response": raw,  "text": tool_result_to_text(result)}
+                bundle["tool_calls"].append(entry["tool_call"])
+                bundle["aio_responses"].append(entry)
                 if raw is not None:
                     bundle["aio_response"] = raw
                 messages.append(
@@ -375,8 +398,13 @@ async def run_with_gemini(model: str, messages: List[Dict[str, Any]], oa_tools: 
             bundle["tool_call"] = {"name": name, "args": args}
             try:
                 result = await session.call_tool(name, arguments=args)
-                tool_text = tool_result_to_text(result)
                 raw = extract_json_from_result(result)
+                tool_text = tool_result_to_text(result)
+
+                entry = {"tool_call": {"name": name, "args": args}, "aio_response": raw,  "text": tool_result_to_text(result)}
+                bundle["tool_calls"].append(entry["tool_call"])
+                bundle["aio_responses"].append(entry)
+
                 if raw is not None:
                     bundle["aio_response"] = raw
 
@@ -455,6 +483,9 @@ async def run_with_openrouter(model: str, messages: List[Dict[str, Any]], oa_too
             try:
                 result = await session.call_tool(name, arguments=args)
                 raw = extract_json_from_result(result)
+                entry = {"tool_call": {"name": name, "args": args}, "aio_response": raw,  "text": tool_result_to_text(result)}
+                bundle["tool_calls"].append(entry["tool_call"])
+                bundle["aio_responses"].append(entry)
                 if raw is not None:
                     bundle["aio_response"] = raw
                 messages.append(
@@ -517,12 +548,10 @@ def _new_result_bundle():
     return {
         "tool_call": None,
         "aio_response": None,
+        "aio_responses": [],
+        "tool_calls": [],
         "llm_response": None,
-        "logs": {
-            "provider": None,
-            "model": None,
-            "rounds": 0
-        }
+        "logs": {"provider": None, "model": None, "rounds": 0}
     }
 
 # ----------------- CLI -----------------
@@ -552,13 +581,15 @@ if __name__ == "__main__":
             model_override=args.model,
         )
     )
-    payload = result.get("aio_response") or result
+    payload = result.get("aio_responses") or result.get("aio_response") or result
     if args.json_only:
         print(json.dumps(to_plain(payload), ensure_ascii=False))
     else:
         if result.get("llm_response"):
             print(result["llm_response"])
         print(json.dumps(to_plain({
+            "tool_calls": result.get("tool_calls"),
+            "aio_responses": result.get("aio_responses"),
             "tool_call": result.get("tool_call"),
-            "aio_response": result.get("aio_response")
+            "aio_response": result.get("aio_response"),
         }), ensure_ascii=False))

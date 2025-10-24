@@ -325,35 +325,30 @@ def aggregate_terms_all(collection: str, start_date: str, end_date: str, extra_p
 def aggregate_terms_specific(collection: str, start_date: str, end_date: str, terms: list[str] | str,
                              extra_params: dict[str, Any] | None = None,) -> dict[str, Any]:
     """
-    Retrieve daily frequency series for specific terms.
+    Retrieve daily frequency series for specific terms (Porter-stemmed).
 
     Endpoint
     --------
-    GET /analysis/aggregate/collections/{collection}/terms/specific
-
-    Parameters
-    ----------
-    collection : {"Twitter", "Mastodon", "Reddit", "YouTube", "BlueSky", "Flickr"}
-    start_date : str (YYYY-MM-DD)
-    end_date : str (YYYY-MM-DD)
-    terms : list[str] or comma-separated str
-    extra_params : dict, optional
+    GET /analysis/terms/collections/{collection}/term
+    Query params:
+      - startDate, endDate (YYYY-MM-DD, inclusive)
+      - terms: comma-separated (e.g., "russia,ukrain")
 
     Returns
     -------
     dict
-    { term: [{"time": "YYYY-MM-DD", "count": int}, ...], ... }
-
-    Examples
-    --------
-    - NL: "twitter daily series for ['covid','vaccine'] in 2022-01" ->
-    aggregate_terms_specific(collection="twitter", start_date="2022-01-01",
-    end_date="2022-01-31", terms=["covid","vaccine"]).
+      { "<term>": [ {"date":"YYYY-MM-DD","count":int}, ... ], ... }
     """
     client = get_client()
     collection = collection.lower().strip()
-    return client.aggregate_terms_specific(collection=collection, start_date=start_date, end_date=end_date, terms=terms,
-                                           extra_params=extra_params or {},)
+    return client.aggregate_terms_specific(
+        collection=collection,
+        start_date=start_date,
+        end_date=end_date,
+        terms=terms,
+        extra_params=extra_params or {},
+    )
+
 # ------- NLP / Embeddings / Topics -------
 # Tool -- List terms available for a given day’s embedding model
 @mcp.tool()

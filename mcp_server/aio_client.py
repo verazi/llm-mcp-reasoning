@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import calendar
 from json import JSONDecodeError
 
@@ -10,8 +10,9 @@ from requests.adapters import HTTPAdapter
 from requests.auth import HTTPBasicAuth
 from urllib3.util.retry import Retry
 
-
 class AIOClient:
+    MAX_DAYS_PER_CALL = 130
+
     def __init__(self, base_url: str | None = None, api_key: str | None = None, timeout: int = 30):
         load_dotenv()
 
@@ -122,6 +123,53 @@ class AIOClient:
         e = datetime.fromisoformat(end_ymd[:10])
         return (e.year - s.year) * 12 + (e.month - s.month) + 1
 
+    @staticmethod
+    def _date_chunks(start_ymd: str, end_ymd: str, max_days: int):
+        s = datetime.fromisoformat(start_ymd[:10])
+        e = datetime.fromisoformat(end_ymd[:10])
+        one_day = timedelta(days=1)
+        cur = s
+        while cur <= e:
+            chunk_end = min(cur + timedelta(days=max_days - 1), e)
+            yield cur.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d")
+            cur = chunk_end + one_day
+
+    @staticmethod
+    def _sum_inplace(target: dict, src: dict, keys=("count", "sentiment", "sentimentcount")):
+        for k in keys:
+            if k in src:
+                if k not in target:
+                    target[k] = 0 if k != "sentiment" else 0.0
+                target[k] += src.get(k, 0)
+
+    @staticmethod
+    def _merge_seasonality_rows(acc: dict, rows: list, sentiment: bool):
+        if not rows:
+            return
+        sample = rows[0]
+        if "time" in sample:
+            key_field = "time"
+        elif "dayofweek" in sample:
+            key_field = "dayofweek"
+        elif "hourofday" in sample:
+            key_field = "hourofday"
+        else:
+            key_field = "time"
+
+        for r in rows:
+            k = r.get(key_field)
+            if k not in acc:
+                acc[k] = dict(r)
+                acc[k].setdefault("count", 0)
+                acc[k].setdefault("sentiment", 0.0)
+                acc[k].setdefault("sentimentcount", 0)
+            else:
+                if "count" in r:
+                    acc[k]["count"] += r.get("count", 0)
+                if sentiment:
+                    acc[k]["sentiment"] += r.get("sentiment", 0.0)
+                    acc[k]["sentimentcount"] += r.get("sentimentcount", 0)
+
     def aggregate_by_time(self, collection: str, start_date: str, end_date: str, aggregation_level: str,  # "day" | "month" | "year"
         sentiment: bool = False, extra_params: dict | None = None,):
         level = aggregation_level.lower()
@@ -224,25 +272,42 @@ class AIOClient:
 
     def aggregate_seasonality(self, collection: str, start_date: str, end_date: str,
                               aggregation_level: str,  # "dayofweek" | "hourofday"
-                              sentiment: bool = False, extra_params: dict | None = None,):
+                              sentiment: bool = False, extra_params: dict | None = None):
         level = aggregation_level.lower()
         if level not in {"dayofweek", "hourofday"}:
             raise ValueError("aggregation_level must be one of: dayofweek, hourofday")
 
         start_date, end_date = self._clamp_to_window(collection, start_date, end_date)
 
-        params = {
-            "startDate": start_date[:10],
-            "endDate": end_date[:10],
+        base_params = {
+            "startDate": None,
+            "endDate": None,
             "aggregationLevel": level,
         }
         if sentiment:
-            params["sentiment"] = "true"
+            base_params["sentiment"] = "true"
         if extra_params:
-            params.update(extra_params)
+            base_params.update(extra_params)
 
         path = f"/analysis/aggregate/collections/{collection}/seasonality"
-        return self._get(path, params=params)
+        acc = {}
+        for chunk_start, chunk_end in self._date_chunks(start_date[:10], end_date[:10], max_days=130):
+            params = dict(base_params)
+            params["startDate"] = chunk_start
+            params["endDate"] = chunk_end
+
+            rows = self._get(path, params=params)
+            if isinstance(rows, list):
+                self._merge_seasonality_rows(acc, rows, sentiment)
+            else:
+                pass
+        def _sort_key(k):
+            try:
+                return int(k)
+            except Exception:
+                return k
+        merged = [acc[k] for k in sorted(acc.keys(), key=_sort_key)]
+        return merged
 
     def aggregate_language(self, collection: str, start_date: str, end_date: str, aggregation_level: str, sentiment: bool = False, extra_params: dict | None = None,):
         level = aggregation_level.lower()
@@ -250,18 +315,30 @@ class AIOClient:
             raise ValueError("aggregation_level must be one of: language, country, state, gccsa, suburb")
 
         start_date, end_date = self._clamp_to_window(collection, start_date, end_date)
-        params = {
-            "startDate": start_date[:10],
-            "endDate": end_date[:10],
-            "aggregationLevel": level,
+        base_params = {"startDate": None, "endDate": None,  "aggregationLevel": level,
         }
         if sentiment:
-            params["sentiment"] = "true"
+            base_params["sentiment"] = "true"
         if extra_params:
-            params.update(extra_params)
+            base_params.update(extra_params)
 
         path = f"/analysis/language/collections/{collection}"
-        return self._get(path, params=params)
+        acc = {}
+        key_field = level
+        for cs, ce in self._date_chunks(start_date[:10], end_date[:10], self.MAX_DAYS_PER_CALL):
+            params = dict(base_params)
+            params["startDate"] = cs
+            params["endDate"] = ce
+            rows = self._get(path, params=params)
+            for r in rows:
+                if key_field not in r:
+                    continue
+                k = r[key_field]
+                if k not in acc:
+                    acc[k] = {key_field: k}
+                self._sum_inplace(acc[k], r, keys=("count", "sentiment", "sentimentcount"))
+        merged = [acc[k] for k in sorted(acc.keys())]
+        return merged
 
     def aggregate_place(self, collection: str, start_date: str, end_date: str, aggregation_level: str, sentiment: bool = False, extra_params: dict | None = None,):
         level = aggregation_level.lower()
@@ -269,18 +346,34 @@ class AIOClient:
             raise ValueError("aggregation_level must be one of: country, state, gccsa, suburb, language")
 
         start_date, end_date = self._clamp_to_window(collection, start_date, end_date)
-        params = {
-            "startDate": start_date[:10],
-            "endDate": end_date[:10],
-            "aggregationLevel": level,
-        }
+        base_params = {"startDate": None, "endDate": None, "aggregationLevel": level,}
         if sentiment:
-            params["sentiment"] = "true"
+            base_params["sentiment"] = "true"
         if extra_params:
-            params.update(extra_params)
-
+            base_params.update(extra_params)
         path = f"/analysis/place/collections/{collection}"
-        return self._get(path, params=params)
+        acc = {}
+        key_field = level
+        for cs, ce in self._date_chunks(start_date[:10], end_date[:10], self.MAX_DAYS_PER_CALL):
+            params = dict(base_params)
+            params["startDate"] = cs
+            params["endDate"] = ce
+
+            rows = self._get(path, params=params)
+            for r in rows:
+                if key_field not in r:
+                    for alt in (key_field, "name", "place", "region"):
+                        if alt in r:
+                            key_field = alt
+                            break
+                if key_field not in r:
+                    continue
+                k = r[key_field]
+                if k not in acc:
+                    acc[k] = {key_field: k}
+                self._sum_inplace(acc[k], r, keys=("count", "sentiment", "sentimentcount"))
+            merged = [acc[k] for k in sorted(acc.keys())]
+            return merged
 
     def aggregate_terms_all(self, collection: str, start_date: str, end_date: str, extra_params: dict | None = None,) -> dict:
         """
@@ -290,40 +383,108 @@ class AIOClient:
         collection = (collection or "").strip().lower()
         start_date, end_date = self._clamp_to_window(collection, start_date, end_date)
 
-        params = {
-            "startDate": start_date[:10],
-            "endDate": end_date[:10],
-        }
+        base_params = {"startDate": None, "endDate": None,}
         if extra_params:
-            params.update(extra_params)
+            base_params.update(extra_params)
 
         path = f"/analysis/terms/collections/{collection}"
-        return self._get(path, params=params)
+
+        acc_terms: dict[str, int] = {}
+        for cs, ce in self._date_chunks(start_date[:10], end_date[:10], self.MAX_DAYS_PER_CALL):
+            params = dict(base_params)
+            params["startDate"] = cs
+            params["endDate"] = ce
+
+        res = self._get(path, params=params)
+        for term, cnt in res["terms"].items():
+            acc_terms[term] = acc_terms.get(term, 0) + int(cnt or 0)
+
+        return {"terms": acc_terms}
 
     def aggregate_terms_specific(self, collection: str, start_date: str, end_date: str, terms: list[str] | str, extra_params: dict | None = None,) -> dict:
-        """
-        Fetch daily frequencies for specific stem terms in [start_date, end_date].
-        Returns a dict mapping each term to a list of {date, count}.
-        """
+        def _norm_terms(ts):
+            if isinstance(ts, (list, tuple)):
+                return [str(t).strip().lower() for t in ts if str(t).strip()]
+            parts = []
+            for ch in str(ts).split(","):
+                parts.extend(ch.split())
+            return [p.strip().lower() for p in parts if p.strip()]
+
+        def _parse_payload(payload):
+            import json
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    return {}
+            if isinstance(payload, dict):
+                return payload
+            if isinstance(payload, list):
+                out = {}
+                for r in payload:
+                    if not isinstance(r, dict):
+                        continue
+                    t = str(r.get("term", "")).strip().lower()
+                    d = str(r.get("date") or r.get("time") or "").strip()
+                    c = int(r.get("count", 0) or 0)
+                    if t and d:
+                        out.setdefault(t, []).append({"date": d, "count": c})
+                return out
+            return {}
+
         collection = (collection or "").strip().lower()
         start_date, end_date = self._clamp_to_window(collection, start_date, end_date)
 
-        if isinstance(terms, (list, tuple)):
-            norm_terms = [t.strip().lower() for t in terms if str(t).strip()]
-            terms_str = ",".join(norm_terms)
-        else:
-            terms_str = ",".join([t.strip().lower() for t in str(terms).split(",") if t.strip()])
+        term_list = _norm_terms(terms)
+        if not term_list:
+            return {}
 
-        params = {
-            "startDate": start_date[:10],
-            "endDate": end_date[:10],
-            "terms": terms_str,
+        base_params = {
+            "terms": ",".join(term_list),
+            "startDate": None,
+            "endDate": None,
         }
         if extra_params:
-            params.update(extra_params)
+            base_params.update(extra_params)
 
         path = f"/analysis/terms/collections/{collection}/term"
-        return self._get(path, params=params)
+
+        from collections import defaultdict
+        acc: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+        for cs, ce in self._date_chunks(start_date[:10], end_date[:10], self.MAX_DAYS_PER_CALL):
+            params = dict(base_params)
+            params["startDate"] = cs
+            params["endDate"] = ce
+
+            payload = self._get(path, params=params)
+            parsed = _parse_payload(payload)
+
+            for term, series in parsed.items():
+                tkey = str(term).strip().lower()
+                if not isinstance(series, list):
+                    continue
+                for row in series:
+                    d = str(row.get("date") or row.get("time") or "").strip()
+                    if not d:
+                        continue
+                    try:
+                        from datetime import datetime
+                        dcanon = datetime.fromisoformat(d[:10]).strftime("%Y-%m-%d")
+                    except Exception:
+                        try:
+                            y, m, dd = d[:10].split("-")
+                            dcanon = f"{int(y):04d}-{int(m):02d}-{int(dd):02d}"
+                        except Exception:
+                            continue
+                    c = int(row.get("count", 0) or 0)
+                    acc[tkey][dcanon] += c
+
+        out: dict[str, list[dict]] = {}
+        for term in sorted(acc.keys()):
+            dates = sorted(acc[term].keys())
+            out[term] = [{"date": d, "count": acc[term][d]} for d in dates]
+        return out
 
     def nlp_terms_available(self, collection: str, day: str, extra_params: dict | None = None,) -> list[str] | dict:
         """
@@ -357,10 +518,6 @@ class AIOClient:
 
         path = f"/analysis/nlp/collections/{collection}/days/{day}/terms/{term}"
         return self._get(path, params=params)
-
-
-
-
 
 # --- test ---
 if __name__ == "__main__":
@@ -400,22 +557,22 @@ if __name__ == "__main__":
     # print("Yearly counts:", year_counts)
     # year_sent = client.aggregate_year("twitter", "2022-06-30", "2023-07-03", sentiment=True)
     # print("Yearly sentiment:", year_sent)
-    # dow_counts = client.aggregate_seasonality("twitter", "2021-07-01", "2021-07-11", "dayofweek")
+    # dow_counts = client.aggregate_seasonality("twitter", "2021-07-01", "2022-07-11", "dayofweek")
     # print("Day-of-week counts:", dow_counts)
-    # hod_sent = client.aggregate_seasonality("twitter", "2021-07-01", "2021-07-11", "hourofday", sentiment=True)
+    # hod_sent = client.aggregate_seasonality("twitter", "2021-07-01", "2022-07-11", "hourofday", sentiment=True)
     # print("Hour-of-day sentiment:", hod_sent)
-    # lang_lang = client.aggregate_language("twitter", "2021-07-01", "2021-07-11", aggregation_level="language")
+    # lang_lang = client.aggregate_language("twitter", "2021-07-01", "2022-07-11", aggregation_level="language")
     # phead("Language aggregation (level=language, count)", lang_lang, n=10)
-    # lang_state = client.aggregate_language("twitter", "2021-07-27", "2021-07-31", aggregation_level="state")
+    # lang_state = client.aggregate_language("twitter", "2021-07-27", "2021-12-31", aggregation_level="state")
     # phead("Language aggregation (level=state, count)", lang_state, n=10)
-    # place_country = client.aggregate_place("twitter", "2021-07-01", "2021-07-11", aggregation_level="country")
+    # place_country = client.aggregate_place("twitter", "2021-07-27", "2021-12-31", aggregation_level="country")
     # phead("Place aggregation (level=country, count)", place_country, n=10)
-    # place_suburb_sent = client.aggregate_place("twitter", "2021-07-26", "2021-07-31", aggregation_level="suburb", sentiment=True)
+    # place_suburb_sent = client.aggregate_place("twitter", "2021-07-27", "2021-12-31", aggregation_level="suburb", sentiment=True)
     # phead("Place aggregation (level=suburb, sentiment)", place_suburb_sent, n=10)
-    # terms_all = client.aggregate_terms_all("twitter", "2021-07-26", "2021-08-10")
-    # phead("All terms (twitter, 2021-07-26 ~ 2021-08-10)", terms_all, n=20)
-    # terms_spec = client.aggregate_terms_specific("twitter", "2021-07-13", "2021-07-31", terms=["scomo", "vaccin"])
-    # phead("Specific terms (scomo,vaccin) daily counts", terms_spec, n=2)
+    # terms_all = client.aggregate_terms_all("twitter", "2021-07-27", "2021-12-31")
+    # phead("All terms (twitter, 2021-07-27 ~ 2021-12-31)", terms_all, n=10)
+    # terms_spec = client.aggregate_terms_specific("twitter","2021-07-27","2021-12-31",terms=["ukrain"])
+    # phead("Specific term 'ukrain' daily counts", terms_spec.get("ukrain", []), n=10)
     model_terms = client.nlp_terms_available("twitter", "2021-07-09")
     ppreview("NLP terms available (twitter, 2021-07-09)", model_terms, n=20)
     sim_map = client.nlp_term_similarity("twitter", "2021-07-09", term="vaccin", topk=25)

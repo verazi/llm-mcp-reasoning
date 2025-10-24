@@ -22,7 +22,6 @@ CSS_FONT_STACK = """
 """
 
 # --- Helpers ---
-
 def log_provider_model(provider: str, model: str) -> None:
     print(f"[Provider={provider}] [Model={model}]", file=sys.stderr)
 
@@ -43,7 +42,7 @@ def _metrics_text(provider: str, model: str, used_vad: bool, elapsed_s: float, n
 def _examples_block():
     return [
         "Show me the daily post counts on Twitter for March 2022.",
-        "Summarize the trend of posts mentioning First Nations during 2022",
+        "Summarize the trend of posts mentioning Formula during 2022.",
         "From January to June 2022 on Twitter, find the month with the highest activity and show the language breakdown for that month.",
         "List the top 20 terms used on Twitter between January and June 2022.",
     ]
@@ -96,15 +95,10 @@ def try_import_client():
 
 _client_entry = try_import_client()
 
-# =========================
-# Robustly extract the last JSON object from mixed stdout
-# =========================
-def extract_json_from_text(s: str) -> Optional[dict]:
-    """
-    Scan and parse the last balanced {...} block as JSON.
-    """
-    last_json = None
-    for start in [m.start() for m in re.finditer(r"\{", s)]:
+def extract_all_json_from_text(s: str) -> list[dict]:
+    found = []
+    opens = [m.start() for m in re.finditer(r"\{", s)]
+    for start in opens:
         depth = 0
         for i, ch in enumerate(s[start:], start=start):
             if ch == "{":
@@ -115,17 +109,33 @@ def extract_json_from_text(s: str) -> Optional[dict]:
                     candidate = s[start:i+1]
                     try:
                         obj = json.loads(candidate)
-                        last_json = obj
+                        if isinstance(obj, dict):
+                            found.append(obj)
                     except Exception:
                         pass
                     break
-    return last_json
+    return found
+
+def pick_primary_json(objs: list[dict]) -> dict:
+    for o in objs:
+        if isinstance(o, dict) and "aio_responses" in o:
+            return o
+    for o in objs:
+        if isinstance(o, dict) and ("aio_response" in o or "tool_call" in o):
+            return o
+    return objs[-1] if objs else {}
+
 
 MODEL_OPTIONS = {
-    "openai": ["gpt-5-mini", "gpt-4o-mini", "gpt-4.1-mini"],
-    "gemini": ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-2.0-flash-lite"],
-    "openrouter": ["deepseek/deepseek-chat-v3.1:free", "x-ai/grok-4-fast:free"]
+    "gemini": ["gemini-2.5-flash", "gemini-2.0-flash"],
+    "openrouter": ["deepseek/deepseek-chat-v3.1:free", "x-ai/grok-4-fast"]
 }
+
+# MODEL_OPTIONS = {
+#     "openai": ["gpt-5-mini", "gpt-4o-mini", "gpt-4.1-mini"],
+#     "gemini": ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-2.0-flash-lite"],
+#     "openrouter": ["deepseek/deepseek-chat-v3.1:free", "x-ai/grok-4-fast"]
+# }
 
 # =========================
 # Call MCP client
@@ -149,6 +159,7 @@ def call_mcp_via_import(nl_query: str, want_natural_answer: bool, provider: str,
     return {
         "tool_call": result.get("tool_call"),
         "aio_response": result.get("aio_response"),
+        "aio_responses": result.get("aio_responses"),
         "llm_response": result.get("llm_response")
     }
 
@@ -178,7 +189,8 @@ def call_mcp_via_subprocess(nl_query: str, want_natural_answer: bool, provider: 
         text=True
     )
     raw = proc.stdout or ""
-    obj = extract_json_from_text(raw) or {}
+    objs = extract_all_json_from_text(raw)
+    obj = pick_primary_json(objs)
 
     natural = None
     if want_natural_answer:
@@ -188,14 +200,18 @@ def call_mcp_via_subprocess(nl_query: str, want_natural_answer: bool, provider: 
                 break
         if natural is None:
             try:
-                jtxt = json.dumps(obj, ensure_ascii=False)
-                natural = raw.replace(jtxt, "").strip()
+                natural = raw
+                for o in objs:
+                    jtxt = json.dumps(o, ensure_ascii=False)
+                    natural = natural.replace(jtxt, "")
+                natural = natural.strip()
             except Exception:
                 natural = raw.strip()
 
     return {
         "tool_call": obj.get("tool_call") if isinstance(obj, dict) else None,
         "aio_response": obj.get("aio_response") if isinstance(obj, dict) else None,
+        "aio_responses": obj.get("aio_responses") if isinstance(obj, dict) else None,
         "llm_response": natural
     }
 
@@ -231,11 +247,22 @@ def run_pipeline(audio_path: Optional[str], nl_text: str, lang: str, use_vad: bo
 
         mcp_result = call_mcp(text, want_natural_answer, provider, model)
 
-        aio = mcp_result.get("aio_response")
-        if isinstance(aio, dict) and "result" in aio:
-            display_json = aio["result"]
+        if isinstance(mcp_result.get("aio_responses"), list) and mcp_result["aio_responses"]:
+            display_json = mcp_result["aio_responses"]
         else:
-            display_json = aio if aio is not None else {"error": "No 'result' field in aio_response."}
+            aio = mcp_result.get("aio_response")
+            if isinstance(aio, dict) and "result" in aio:
+                display_json = aio["result"]
+            elif aio is not None:
+                display_json = aio
+            else:
+                display_json = {"error": "No 'aio_responses' or 'aio_response' found."}
+
+        # aio = mcp_result.get("aio_response")
+        # if isinstance(aio, dict) and "result" in aio:
+        #     display_json = aio["result"]
+        # else:
+        #     display_json = aio if aio is not None else {"error": "No 'result' field in aio_response."}
 
         llm_msg = (mcp_result.get("llm_response") or "").strip()
         return text, display_json, llm_msg
@@ -247,7 +274,7 @@ def launch():
     with gr.Blocks(title="MCP Voice UI", css=CSS_FONT_STACK, theme=gr.themes.Soft()) as demo:
         # --- Defaults ---
         default_provider = "gemini"
-        default_model = MODEL_OPTIONS[default_provider][2]
+        default_model = MODEL_OPTIONS[default_provider][0]
 
         # --- Header / Status bar ---
         gr.Markdown("## MCP Voice UI")
@@ -370,8 +397,6 @@ def launch():
 
     log_provider_model(default_provider, default_model)
     demo.launch(server_name="127.0.0.1", server_port=7860, show_error=True)
-
-
 
 if __name__ == "__main__":
     launch()
