@@ -63,6 +63,15 @@ python ui.py
 ```
 
 
-## Interface
+## Demo
+Query: From January to June 2022 on Twitter, find the month with the highest activity and show the language breakdown for that month.
+
+- Summary in Natural Language from LLM
+
+<p align="center"> <img src="https://github.com/verazi/llm-mcp-reasoning/blob/main/figures/demo1.png" width="100%" alt="MCP Voice UI Overview"> </p>
+
+- Raw JSON retrieve from MCP server
+
+<p align="center"> <img src="https://github.com/verazi/llm-mcp-reasoning/blob/main/figures/demo2.png" width="100%" alt="MCP JSON and Reasoning Output"> </p>
 
 
